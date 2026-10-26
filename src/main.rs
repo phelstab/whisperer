@@ -6,6 +6,7 @@ mod engine;
 mod gpu;
 mod language;
 mod name_dialog;
+mod progress;
 mod record;
 mod tray;
 mod update;
@@ -44,6 +45,8 @@ pub enum Command {
     OpenOutput,
     Settings,
     SelfTest,
+    /// Reopen the setup window.
+    ShowProgress,
     CheckUpdates,
     /// Transcribe in this language code (or "auto") from now on.
     Language(String),
@@ -70,6 +73,10 @@ struct App {
     status: String,
     /// An update was installed: restart once idle.
     restart_pending: bool,
+    /// Where transcription runs, once the engine is ready.
+    ready: Option<engine::Ready>,
+    /// The setup window was opened automatically once (it isn't forced open again after hiding).
+    progress_shown: bool,
 }
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
@@ -89,11 +96,27 @@ fn refresh(app: &App) {
     tray::show(look, &tip);
 }
 
-/// For the tray menu: whether we're recording, a status line, and the language setting (a valid
-/// code or "auto").
-pub fn menu_info() -> (bool, String, String) {
-    let lang = config::Config::load().ok().and_then(|c| language::parse(&c.language)).unwrap_or_else(|| "auto".into());
-    with_app(|a| (a.recording.is_some(), if a.status.is_empty() { "Starting…".into() } else { a.status.clone() }, lang))
+/// What the tray menu shows.
+pub struct MenuInfo {
+    pub recording: bool,
+    pub status: String,
+    /// "GPU: … · CUDA 12.4 engine · driver CUDA 13.4" once ready.
+    pub gpu: Option<String>,
+    /// Still preparing (downloads, tests): offer the setup window.
+    pub preparing: bool,
+    /// The language setting: a valid code or "auto".
+    pub language: String,
+}
+
+pub fn menu_info() -> MenuInfo {
+    let language = config::Config::load().ok().and_then(|c| language::parse(&c.language)).unwrap_or_else(|| "auto".into());
+    with_app(|a| MenuInfo {
+        recording: a.recording.is_some(),
+        status: if a.status.is_empty() { "Starting…".into() } else { a.status.clone() },
+        gpu: a.ready.as_ref().map(|r| format!("GPU: {} · {} engine · driver CUDA {}", r.gpu, r.engine, r.driver_cuda)),
+        preparing: a.ready.is_none() && a.busy,
+        language,
+    })
 }
 
 /// Carries out a tray command.
@@ -108,6 +131,10 @@ pub fn command(c: Command) {
             win::open(&dir);
         }
         Command::Settings => win::open(&config::ensure_file()),
+        Command::ShowProgress => {
+            let status = with_app(|a| a.status.clone());
+            progress::open(&status);
+        }
         Command::SelfTest => with_app(|a| {
             a.engine.send(Job::SelfTest);
             a.busy = true;
@@ -202,11 +229,43 @@ pub fn handle_events() {
     let events = std::mem::take(&mut *EVENTS.lock().unwrap());
     for e in events {
         match e {
-            Event::Engine(Report::Status(s)) => with_app(|a| { a.status = s; a.busy = true; }),
-            Event::Engine(Report::Ready(d)) => with_app(|a| a.status = format!("ready ({d})")),
+            Event::Engine(Report::Status(s)) => {
+                // While setting up, the setup window shows each step (unpacking, the GPU test).
+                if with_app(|a| a.ready.is_none()) {
+                    // The first run on a new GPU or driver may compile CUDA kernels, which takes a while.
+                    let hint = if s.starts_with("Testing") { "The first test on a new GPU or driver can take a few minutes." } else { "" };
+                    progress::activity(&s, hint);
+                }
+                with_app(|a| { a.status = s; a.busy = true; });
+            }
+            Event::Engine(Report::Download { what, done, total }) => {
+                let open = with_app(|a| {
+                    a.status = format!("downloading {what}: {}%", done * 100 / total.max(1));
+                    a.busy = true;
+                    !std::mem::replace(&mut a.progress_shown, true)
+                });
+                if open {
+                    progress::open(&format!("Downloading {what}…"));
+                }
+                progress::download(&what, done, total);
+            }
+            Event::Engine(Report::Ready(r)) => {
+                let new = with_app(|a| {
+                    a.status = format!("ready · {}", r.short());
+                    a.ready.replace(r.clone()).as_ref() != Some(&r)
+                });
+                if progress::is_open() {
+                    progress::finish("Ready to transcribe", &r.long(), true);
+                } else if new {
+                    tray::balloon("Ready to transcribe", &r.long(), None);
+                }
+            }
             Event::Engine(Report::Unavailable(e)) => {
-                with_app(|a| a.status = "transcription unavailable, see the last notification".into());
-                tray::balloon("Transcription is not available yet", &e, None);
+                with_app(|a| { a.status = "transcription unavailable, see the last notification".into(); a.ready = None; });
+                if progress::is_open() {
+                    progress::finish("Transcription is not available", &e, false);
+                }
+                tray::balloon("Transcription is not available", &e, None);
             }
             Event::Engine(Report::Done { audio, transcript, language: lang, error }) => {
                 let name = audio.file_stem().unwrap_or_default().to_string_lossy().into_owned();
@@ -218,7 +277,7 @@ pub fn handle_events() {
                     (None, e) => tray::balloon("Transcription failed", &format!("{}\nThe audio was saved: {name}.wav", e.unwrap_or_default()),
                         audio.parent().map(Path::to_path_buf)),
                 }
-                with_app(|a| a.status = "ready".into());
+                with_app(|a| a.status = a.ready.as_ref().map_or_else(|| "ready".into(), |r| format!("ready · {}", r.short())));
             }
             Event::Engine(Report::SelfTest(path)) => {
                 win::open(&path);
@@ -247,10 +306,18 @@ pub fn timestamp() -> String {
 }
 
 /// Takes the per-user single-instance lock, or `None` if another instance holds it. After an update
-/// the old process may still be exiting, so `wait` retries for a few seconds.
+/// the old process may still be exiting, so `wait` retries for a few seconds. One instance per
+/// data folder: a separate `WHISPERER_DATA_DIR` (e.g. for testing) is a separate installation.
 fn single_instance(wait: bool) -> Option<HANDLE> {
+    let mut name = String::from("Local\\whisperer");
+    if let Some(dir) = std::env::var_os("WHISPERER_DATA_DIR") {
+        let mut h = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&dir, &mut h);
+        name += &format!("-{:x}", std::hash::Hasher::finish(&h));
+    }
+    let name = HSTRING::from(name);
     for _ in 0..if wait { 50 } else { 1 } {
-        let handle = unsafe { CreateMutexW(None, true, w!("Local\\whisperer")) }.ok()?;
+        let handle = unsafe { CreateMutexW(None, true, &name) }.ok()?;
         if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
             return Some(handle);
         }
@@ -337,7 +404,8 @@ fn main() {
 
     tray::create();
     let engine = Engine::spawn(|r| post(Event::Engine(r)));
-    APP.set(Some(App { engine, recording: None, busy: true, status: "starting…".into(), restart_pending: false }));
+    APP.set(Some(App { engine, recording: None, busy: true, status: "starting…".into(), restart_pending: false,
+        ready: None, progress_shown: false }));
     with_app(|a| refresh(a));
     if updated {
         tray::balloon("Whisperer updated", &format!("Now running v{VERSION}."), None);

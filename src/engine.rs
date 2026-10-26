@@ -128,8 +128,10 @@ pub enum Job {
 pub enum Report {
     /// Current activity, for the tooltip.
     Status(String),
-    /// Transcription is ready on this backend (description).
-    Ready(String),
+    /// Transcription is ready: on which GPU, engine and driver.
+    Ready(Ready),
+    /// A download is running: `done` of `total` bytes of `what`.
+    Download { what: String, done: u64, total: u64 },
     /// Preparing failed; transcription will be retried with the next recording.
     Unavailable(String),
     /// A recording was saved; the transcript too, unless `error`.
@@ -139,6 +141,31 @@ pub enum Report {
     SelfTest(PathBuf),
     /// No more queued jobs.
     Idle,
+}
+
+/// Where transcription runs, for the user.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Ready {
+    pub gpu: String,
+    pub vram_gib: f64,
+    /// The whisper.cpp build's CUDA version, e.g. "CUDA 12.4".
+    pub engine: &'static str,
+    /// Newest CUDA version the driver supports, e.g. "13.4".
+    pub driver_cuda: String,
+    pub model: &'static str,
+}
+
+impl Ready {
+    /// "NVIDIA GeForce RTX 5090 · CUDA 12.4"
+    pub fn short(&self) -> String {
+        format!("{} · {}", self.gpu, self.engine)
+    }
+
+    /// Two lines with everything: GPU and memory; engine, driver and model.
+    pub fn long(&self) -> String {
+        format!("{} ({:.0} GB)
+{} engine · driver supports CUDA {} · whisper {}", self.gpu, self.vram_gib, self.engine, self.driver_cuda, self.model)
+    }
 }
 
 /// Handle to the engine thread.
@@ -154,9 +181,9 @@ impl Engine {
         thread::spawn(move || {
             let mut worker = Worker::new(Box::new(report));
             for job in rx.iter() {
-                worker.handle(job);
+                worker.handle_safely(job);
                 while let Ok(next) = rx.try_recv() {
-                    worker.handle(next);
+                    worker.handle_safely(next);
                 }
                 (worker.report)(Report::Idle);
             }
@@ -174,13 +201,26 @@ impl Engine {
 struct Choice {
     backend: Backend,
     gpu: Gpu,
+    /// The driver's CUDA version, e.g. "13.4".
+    driver_cuda: String,
     cli: PathBuf,
     model: PathBuf,
+    model_kind: Model,
 }
 
 impl Choice {
     fn describe(&self) -> String {
         format!("{} on {}", self.backend.label(), self.gpu.name)
+    }
+
+    fn ready(&self) -> Ready {
+        Ready {
+            gpu: self.gpu.name.clone(),
+            vram_gib: self.gpu.vram as f64 / (1u64 << 30) as f64,
+            engine: self.backend.label(),
+            driver_cuda: self.driver_cuda.clone(),
+            model: match self.model_kind { Model::LargeV3 => "large-v3", Model::LargeV3Q5 => "large-v3 (5-bit)" },
+        }
     }
 }
 
@@ -212,13 +252,24 @@ impl Worker {
         Worker { report, choice: None, data: config::data_dir() }
     }
 
+    /// `handle`, but a panic (a bug) is reported instead of silently ending the engine thread.
+    fn handle_safely(&mut self, job: Job) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle(job)));
+        if let Err(panic) = result {
+            let what = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()));
+            self.choice = None;
+            (self.report)(Report::Unavailable(format!("Internal error: {}", what.unwrap_or_default())));
+        }
+    }
+
     pub fn handle(&mut self, job: Job) {
         let cfg = Config::load().unwrap_or_default();
         match job {
-            Job::Prepare => match self.prepare(&cfg, &[]) {
-                Ok(c) => (self.report)(Report::Ready(c.describe())),
-                Err(e) => (self.report)(Report::Unavailable(e)),
-            },
+            Job::Prepare => {
+                if let Err(e) = self.prepare(&cfg, &[]) {
+                    (self.report)(Report::Unavailable(e));
+                }
+            }
             Job::Transcribe { tracks, base } => {
                 let done = self.transcribe(&cfg, &tracks, &base);
                 (self.report)(done);
@@ -268,9 +319,10 @@ impl Worker {
                 }
             };
             let model_path = self.ensure_model(model)?;
-            let choice = Choice { backend: b, gpu: gpu.clone(), cli, model: model_path };
+            let choice = Choice { backend: b, gpu: gpu.clone(), driver_cuda: cuda.driver_text(), cli, model: model_path, model_kind: model };
             if state.verdicts.get(&key).is_some_and(|v| v.ok) {
                 self.choice = Some(choice.clone());
+                (self.report)(Report::Ready(choice.ready()));
                 return Ok(choice);
             }
             self.status(format!("Testing {}…", choice.describe()));
@@ -281,6 +333,7 @@ impl Worker {
             match result {
                 Ok(_) => {
                     self.choice = Some(choice.clone());
+                    (self.report)(Report::Ready(choice.ready()));
                     return Ok(choice);
                 }
                 Err(e) => problems.push(format!("{}: {e}", b.label())),
@@ -357,7 +410,7 @@ impl Worker {
         }
         let report = |done: u64, total: u64| {
             let total = if total > 0 { total } else { a.size };
-            self.status(format!("Downloading {what}: {}% of {:.1} GB", done * 100 / total.max(1), total as f64 / 1e9));
+            (self.report)(Report::Download { what: what.to_string(), done, total });
         };
         download::ensure(a.url, dest, a.sha256, &report)
     }
@@ -534,7 +587,7 @@ impl Worker {
                 continue;
             }
             let result = self.ensure_runtime(b).and_then(|cli| {
-                let choice = Choice { backend: b, gpu: gpu.clone(), cli, model: self.ensure_model(model)? };
+                let choice = Choice { backend: b, gpu: gpu.clone(), driver_cuda: cuda.driver_text(), cli, model: self.ensure_model(model)?, model_kind: model };
                 self.status(format!("Self-test: {}…", choice.describe()));
                 self.selftest(&choice)
             });

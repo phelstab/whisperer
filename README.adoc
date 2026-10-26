@@ -18,7 +18,7 @@ Download `whisperer-vX.Y.Z.exe` from the latest release, rename to `whisperer.ex
 First start downloads whisper.cpp (up to 0.7 GB) and the model (3.1 GB) to `%LOCALAPPDATA%\Whisperer`, SHA-256 checked. Recording works meanwhile; transcription waits for the downloads.
 
 Language::
-Tray menu *Language*: Auto-detect, English, German, French, Spanish, Italian, Dutch, Portuguese, Polish, Turkish, Russian, Chinese, Japanese. Any of whisper's 100 codes in the settings, e.g. `language = "de"`. `de-DE`, `en_US` etc. count as `de`, `en`.
+Tray menu *Language*: Auto-detect, English, German, French, Spanish, Italian, Dutch, Portuguese, Polish, Turkish, Russian, Chinese, Japanese. Any of whisper's 100 codes in the settings, e.g. `language = "sv"`. `de-DE`, `en_US` etc. count as `de`, `en`.
 +
 * `auto` detects once from the first 30 s and uses that for the whole recording. The notification shows it, e.g. "German (de)".
 * A fixed language is more reliable for short recordings or ones starting with silence, music or another language.
@@ -42,6 +42,10 @@ At start, `nvcuda.dll` reports the CUDA version and GPUs; the one with the most 
 +
 "Run GPU self-test" or `whisperer.exe --selftest` tests all supported engines and writes a report to the output folder. Logs: `%LOCALAPPDATA%\Whisperer\logs`. `whisperer.exe --record <seconds> [name]` records and transcribes without the tray.
 
+== V0.3.0 - 26.10.2026 - Paul Helstab
+
+Change Description::
+- Bugfix in initial setup
 
 
 == V0.2.0 - 26.10.2026 - Paul Helstab

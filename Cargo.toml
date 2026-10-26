@@ -10,7 +10,7 @@ serde_json = "1"
 sha2 = "0.10"
 toml = { version = "1.1.6", default-features = false, features = ["std", "parse", "serde"] }
 ureq = { version = "3", default-features = false, features = ["native-tls", "json"] }
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_System_Variant", "Win32_Storage_FileSystem", "Win32_Media_Audio", "Win32_Media_Multimedia", "Win32_Media_KernelStreaming", "Win32_Devices_FunctionDiscovery", "Win32_Devices_Properties", "Win32_Security"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_System_Variant", "Win32_Storage_FileSystem", "Win32_Media_Audio", "Win32_Media_Multimedia", "Win32_Media_KernelStreaming", "Win32_Devices_FunctionDiscovery", "Win32_Devices_Properties", "Win32_Security"] }
 zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.release]

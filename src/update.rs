@@ -66,7 +66,8 @@ fn run(manual: bool) {
     if BUSY.swap(true, Ordering::Acquire) {
         return;
     }
-    let outcome = match check_and_install() {
+    let checked = std::panic::catch_unwind(check_and_install).unwrap_or_else(|_| Err("internal error in the update check".into()));
+    let outcome = match checked {
         Ok(true) => Outcome::Installed,
         Ok(false) => Outcome::UpToDate,
         Err(e) => Outcome::Failed(e),
@@ -161,5 +162,19 @@ mod tests {
     #[test]
     fn this_build_has_a_version() {
         assert!(parse_version(crate::VERSION).is_some());
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    /// Real call to the GitHub API, as the updater makes it. Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn reads_the_latest_release() {
+        let mut r = crate::download::agent().get(super::LATEST).header("Accept", "application/vnd.github+json").call().unwrap();
+        let release: super::Release = r.body_mut().read_json().unwrap();
+        assert!(super::parse_version(&release.tag_name).is_some(), "{}", release.tag_name);
+        let exe = format!("whisperer-{}.exe", release.tag_name);
+        assert!(release.assets.iter().any(|a| a.name == exe && a.digest.as_deref().is_some_and(|d| d.starts_with("sha256:"))));
     }
 }

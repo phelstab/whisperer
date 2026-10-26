@@ -6,9 +6,14 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// HTTP client with a connect timeout and our user agent (GitHub's API requires one).
+/// HTTP client with a connect timeout and our user agent (GitHub's API requires one). TLS is
+/// Windows' own (SChannel, system certificate store); ureq defaults to Rustls, which isn't built in
+/// and would panic on the first https request.
 pub fn agent() -> ureq::Agent {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+    let tls = TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
     ureq::Agent::config_builder()
+        .tls_config(tls)
         .timeout_connect(Some(Duration::from_secs(15)))
         .user_agent(format!("whisperer/{}", crate::VERSION))
         .build()
@@ -114,4 +119,45 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
     p.push(suffix);
     p.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real download through GitHub's redirect to its CDN (8.9 MB). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn downloads_a_github_release_asset() {
+        let dest = std::env::temp_dir().join(format!("whisperer-dl-test-{}.zip", std::process::id()));
+        let url = "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip";
+        let sha = "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb";
+        let last = std::cell::Cell::new((0, 0));
+        ensure(url, &dest, sha, &|d, t| last.set((d, t))).unwrap();
+        assert_eq!(last.get(), (8_928_640, 8_928_640), "progress reaches the total");
+        let _ = fs::remove_file(&dest);
+        let _ = fs::remove_file(with_suffix(&dest, ".sha256"));
+    }
+
+    /// Real download from Hugging Face (redirects to its CDN), interrupted and resumed: the first
+    /// 10 MB are kept as `.part` and the rest is fetched with a Range request (78 MB in total).
+    #[test]
+    #[ignore]
+    fn resumes_a_hugging_face_download() {
+        let dir = std::env::temp_dir().join(format!("whisperer-resume-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin";
+        let sha = "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21";
+        let full = dir.join("full.bin");
+        fetch(url, &full, Some(sha), &|_, _| {}).unwrap();
+        let resumed = dir.join("resumed.bin");
+        let bytes = fs::read(&full).unwrap();
+        fs::write(with_suffix(&resumed, ".part"), &bytes[..10 << 20]).unwrap();
+        let first = std::cell::Cell::new(None);
+        fetch(url, &resumed, Some(sha), &|d, t| { if first.get().is_none() { first.set(Some((d, t))) } }).unwrap();
+        let (done, total) = first.get().unwrap();
+        assert!(done >= 10 << 20, "continued after the kept part, not from 0 ({done})");
+        assert_eq!(total, 77_691_713);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

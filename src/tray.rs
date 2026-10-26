@@ -17,6 +17,8 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_EVENTS: u32 = WM_APP + 2;
 const ID_VERSION: usize = 1;
 const ID_STATUS: usize = 2;
+const ID_GPU: usize = 10;
+const ID_PROGRESS: usize = 11;
 const ID_TOGGLE: usize = 3;
 const ID_OUTPUT: usize = 4;
 const ID_SETTINGS: usize = 5;
@@ -171,13 +173,20 @@ fn icon(look: Look) -> HICON {
 
 /// Shows the menu at the mouse pointer, waits for a choice and hands it to `crate::command`.
 fn menu(hwnd: HWND) {
-    let (recording, status, lang) = crate::menu_info();
+    let info = crate::menu_info();
+    let (recording, lang) = (info.recording, info.language);
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return };
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         let version = HSTRING::from(format!("Whisperer v{}", crate::VERSION));
         let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, ID_VERSION, &version);
-        let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, ID_STATUS, &HSTRING::from(status));
+        if let Some(gpu) = &info.gpu {
+            let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, ID_GPU, &HSTRING::from(gpu.as_str()));
+        }
+        let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, ID_STATUS, &HSTRING::from(info.status));
+        if info.preparing {
+            let _ = AppendMenuW(m, MF_STRING, ID_PROGRESS, w!("Show setup progress"));
+        }
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let toggle = if recording { w!("Stop recording") } else { w!("Start recording") };
         let _ = AppendMenuW(m, MF_STRING | MF_DEFAULT, ID_TOGGLE, toggle);
@@ -213,6 +222,7 @@ fn menu(hwnd: HWND) {
             ID_OUTPUT => Command::OpenOutput,
             ID_SETTINGS => Command::Settings,
             ID_SELFTEST => Command::SelfTest,
+            ID_PROGRESS => Command::ShowProgress,
             ID_UPDATE => Command::CheckUpdates,
             ID_AUTOSTART => return win::set_autostart(!win::autostart()),
             ID_QUIT => Command::Quit,
