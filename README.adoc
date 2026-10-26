@@ -11,17 +11,49 @@
 = Whisperer
 
 Description::
-A Windows 11 tray application for machines with NVIDIA GPUs (CUDA).
-
-* Lives as a small waveform icon in the notification area (bottom right of the taskbar)
-* Updates itself automatically from the public GitHub releases of https://github.com/phelstab/whisperer
-* Tray menu: version, check for updates, start with Windows, quit
+Windows 11 tray app. Records microphone and desktop audio, transcribes with whisper-large-v3 on NVIDIA GPUs (CUDA).
 
 Installation::
-Download `whisperer-vX.Y.Z.exe` from the latest release, rename it to `whisperer.exe`, put it in a folder you can write to (e.g. `%LOCALAPPDATA%\Whisperer`) and run it. The updater replaces the exe in place, so it must not live under `Program Files`.
+Download `whisperer-vX.Y.Z.exe` from the latest release, rename to `whisperer.exe`, put it in a writable folder (e.g. `%LOCALAPPDATA%\Whisperer`, not `Program Files`: the updater replaces the exe) and run it.
+First start downloads whisper.cpp (up to 0.7 GB) and the model (3.1 GB) to `%LOCALAPPDATA%\Whisperer`, SHA-256 checked. Recording works meanwhile; transcription waits for the downloads.
 
-Releasing::
-The topmost `== V<x.y.z>` heading below is the version. Add a new section on top with a higher version and push to `main`: the build workflow then publishes release `v<x.y.z>` with its `- ` lines as release notes, and every running installation installs it within a few hours (or right away via "Check for updates").
+Language::
+Tray menu *Language*: Auto-detect, English, German, French, Spanish, Italian, Dutch, Portuguese, Polish, Turkish, Russian, Chinese, Japanese. Any of whisper's 100 codes in the settings, e.g. `language = "de"`. `de-DE`, `en_US` etc. count as `de`, `en`.
++
+* `auto` detects once from the first 30 s and uses that for the whole recording. The notification shows it, e.g. "German (de)".
+* A fixed language is more reliable for short recordings or ones starting with silence, music or another language.
+* Speech in another language gets *translated* into the set one (English speech with `de` gives German text). Mixed-language recordings come out in one language; use `auto` or the main language.
+
+Settings::
+`%APPDATA%\Whisperer\config.toml` (menu: Settings): `output_dir`, `language` (`auto`, `en`, `de`, ...), `ask_name`, `backend` (`auto`, `cuda12`, `cuda11`).
+
+GPU and CUDA support::
+Runs prebuilt `whisper-cli` from whisper.cpp `b5454` (v1.9.5) with `ggml-large-v3.bin` in a separate process, so GPU/driver crashes can't take down the tray app. Needs only an NVIDIA driver, no CUDA toolkit.
++
+[cols="2,2,2,3"]
+|===
+| Engine | Driver | GPU (compute capability) | Notes
+
+| CUDA 12.4 | CUDA 12.0+ (R525+) | 5.0+ (Maxwell to Blackwell) | Default. Newer GPUs (RTX 50xx, 12.0) use PTX, compiled once on first use (can take minutes, cached).
+| CUDA 11.8 | CUDA 11.0+ (R450+) | 3.5+ (Kepler to Ada) | Old drivers, Kepler.
+|===
++
+At start, `nvcuda.dll` reports the CUDA version and GPUs; the one with the most memory is used. Each candidate engine must transcribe a test clip correctly on the GPU (CPU fallback = fail). Results are cached per engine, GPU, driver and model, so driver updates re-test. If an engine fails on a recording (e.g. out of memory), the next one takes over. No CPU fallback: without a usable GPU (no driver, no GPU, or older than Kepler) the app shows "No CUDA GPU detected" and keeps the audio. GPUs under 6 GB get 5-bit quantized large-v3 (1.1 GB).
++
+"Run GPU self-test" or `whisperer.exe --selftest` tests all supported engines and writes a report to the output folder. Logs: `%LOCALAPPDATA%\Whisperer\logs`. `whisperer.exe --record <seconds> [name]` records and transcribes without the tray.
+
+
+
+== V0.2.0 - 26.10.2026 - Paul Helstab
+
+Change Description::
+- Left click on tray icon records default mic + output (WASAPI loopback) into one WAV
+- Transcription with whisper-large-v3 (whisper.cpp) to .txt and .srt; downloaded on first start, SHA-256 checked
+- GPU detection via CUDA driver; CUDA 12.4 and 11.8 engines (cuBLAS), self-tested on the GPU, automatic fallback; else "No CUDA GPU detected"
+- Language menu (auto or fixed, any of 100 codes in settings); detected language shown
+- Name dialog after recording; output folder with timestamped files; settings file
+- GPU self-test report (menu or `--selftest`)
+- Updates wait until nothing is recording or transcribing
 
 == V0.1.0 - 26.10.2026 - Paul Helstab
 

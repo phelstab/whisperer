@@ -31,3 +31,11 @@ pub fn set_autostart(on: bool) {
         let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ.0, Some(value.as_ptr() as _), value.len() as u32 * 2);
     }
 }
+
+/// Opens `path` (a file or folder) with its default program, like double-clicking it in Explorer.
+pub fn open(path: &std::path::Path) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let target = windows::core::HSTRING::from(path.as_os_str());
+    unsafe { ShellExecuteW(None, w!("open"), &target, None, None, SW_SHOWNORMAL); }
+}
