@@ -1,0 +1,30 @@
+:toc: preamble
+:doctype: book
+:encoding: utf-16
+:lang: en
+:toclevels: 2
+:icons: font
+:hardbreaks:
+:nofooter:
+:toc-title: Version History
+
+= Whisperer
+
+Description::
+A Windows 11 tray application for machines with NVIDIA GPUs (CUDA).
+
+* Lives as a small waveform icon in the notification area (bottom right of the taskbar)
+* Updates itself automatically from the public GitHub releases of https://github.com/phelstab/whisperer
+* Tray menu: version, check for updates, start with Windows, quit
+
+Installation::
+Download `whisperer-vX.Y.Z.exe` from the latest release, rename it to `whisperer.exe`, put it in a folder you can write to (e.g. `%LOCALAPPDATA%\Whisperer`) and run it. The updater replaces the exe in place, so it must not live under `Program Files`.
+
+Releasing::
+The topmost `== V<x.y.z>` heading below is the version. Add a new section on top with a higher version and push to `main`: the build workflow then publishes release `v<x.y.z>` with its `- ` lines as release notes, and every running installation installs it within a few hours (or right away via "Check for updates").
+
+== V0.1.0 - 26.10.2026 - Paul Helstab
+
+Change Description::
+- Initial release: tray icon with version, "Check for updates", "Start with Windows" and "Quit"
+- Automatic updates from GitHub releases (checked at start and every 6 hours, SHA-256 verified)
