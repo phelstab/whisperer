@@ -40,7 +40,15 @@ Runs prebuilt `whisper-cli` from whisper.cpp `b5454` (v1.9.5) with `ggml-large-v
 +
 At start, `nvcuda.dll` reports the CUDA version and GPUs; the one with the most memory is used. Each candidate engine must transcribe a test clip correctly on the GPU (CPU fallback = fail). Results are cached per engine, GPU, driver and model, so driver updates re-test. If an engine fails on a recording (e.g. out of memory), the next one takes over. No CPU fallback: without a usable GPU (no driver, no GPU, or older than Kepler) the app shows "No CUDA GPU detected" and keeps the audio. GPUs under 6 GB get 5-bit quantized large-v3 (1.1 GB).
 +
-"Run GPU self-test" or `whisperer.exe --selftest` tests all supported engines and writes a report to the output folder. Logs: `%LOCALAPPDATA%\Whisperer\logs`. `whisperer.exe --record <seconds> [name]` records and transcribes without the tray.
+"Run GPU self-test" or `whisperer.exe --selftest` tests all supported engines and writes a report to the output folder. Logs: `%LOCALAPPDATA%\Whisperer\logs`. `whisperer.exe --record <seconds> [name]` records and transcribes without the tray; `whisperer.exe --transcribe <file>` transcribes a file again.
+
+== V0.4.0 - 27.10.2026 - Paul Helstab
+
+Change Description::
+- Fix transcripts repeating one sentence until the end of the recording: each 30 s window is decoded without the previous text as prompt (`-mc 0`)
+- Fix made-up phrases on silence: only speech is transcribed, found with Silero voice detection (`--vad`, 0.9 MB model, downloaded on first start)
+- Tray menu *Transcribe audio file…*: pick one or more recordings (or other WAV, MP3, FLAC files) to transcribe again, e.g. ones made before this fix; replaces the `.txt` / `.srt` next to each file
+
 
 == V0.3.0 - 26.10.2026 - Paul Helstab
 

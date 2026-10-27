@@ -26,6 +26,7 @@ const ID_SELFTEST: usize = 6;
 const ID_UPDATE: usize = 7;
 const ID_AUTOSTART: usize = 8;
 const ID_QUIT: usize = 9;
+const ID_RETRANSCRIBE: usize = 12;
 const ID_LANG_AUTO: usize = 100;
 /// `ID_LANG_AUTO + 1 + i` = `language::MENU[i]`; the one after those is a code set in the file.
 const ID_LANG_OTHER: usize = ID_LANG_AUTO + 1 + language::MENU.len();
@@ -191,6 +192,7 @@ fn menu(hwnd: HWND) {
         let toggle = if recording { w!("Stop recording") } else { w!("Start recording") };
         let _ = AppendMenuW(m, MF_STRING | MF_DEFAULT, ID_TOGGLE, toggle);
         let _ = AppendMenuW(m, MF_STRING, ID_OUTPUT, w!("Open output folder"));
+        let _ = AppendMenuW(m, MF_STRING, ID_RETRANSCRIBE, w!("Transcribe audio file…"));
         let _ = AppendMenuW(m, MF_STRING, ID_SETTINGS, w!("Settings"));
         if let Ok(sub) = CreatePopupMenu() {
             let item = |id, code: &str| {
@@ -220,6 +222,7 @@ fn menu(hwnd: HWND) {
         let command = match cmd {
             ID_TOGGLE => Command::Toggle,
             ID_OUTPUT => Command::OpenOutput,
+            ID_RETRANSCRIBE => Command::Retranscribe,
             ID_SETTINGS => Command::Settings,
             ID_SELFTEST => Command::SelfTest,
             ID_PROGRESS => Command::ShowProgress,

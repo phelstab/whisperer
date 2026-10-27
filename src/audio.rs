@@ -38,6 +38,14 @@ pub fn mix(tracks: &[&Path], out: &Path) -> Result<f64, String> {
     Ok(count as f64 / (RATE as f64 * CHANNELS as f64))
 }
 
+/// Whether `path` is a WAV in our recording format (48 kHz stereo 16-bit), which `to_16k_mono` takes.
+pub fn is_recording(path: &Path) -> bool {
+    hound::WavReader::open(path).is_ok_and(|r| {
+        let s = r.spec();
+        s.sample_rate == RATE && s.channels == CHANNELS && s.bits_per_sample == 16 && s.sample_format == hound::SampleFormat::Int
+    })
+}
+
 /// Converts `input` (48 kHz stereo 16-bit) to 16 kHz mono 16-bit `out`: downmix, low-pass, keep
 /// every third sample.
 pub fn to_16k_mono(input: &Path, out: &Path) -> Result<(), String> {

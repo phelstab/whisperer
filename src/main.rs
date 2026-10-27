@@ -43,6 +43,8 @@ pub enum Event {
 pub enum Command {
     Toggle,
     OpenOutput,
+    /// Pick audio files and transcribe them again.
+    Retranscribe,
     Settings,
     SelfTest,
     /// Reopen the setup window.
@@ -129,6 +131,19 @@ pub fn command(c: Command) {
             let dir = load_config().output_dir;
             let _ = std::fs::create_dir_all(&dir);
             win::open(&dir);
+        }
+        Command::Retranscribe => {
+            // The dialog runs a message loop, so this must happen outside `with_app`.
+            let files = win::pick_audio_files(&load_config().output_dir);
+            if files.is_empty() {
+                return;
+            }
+            with_app(|a| {
+                a.status = format!("{} file(s) queued for transcription…", files.len());
+                a.busy = true;
+                files.into_iter().for_each(|f| a.engine.send(Job::Retranscribe(f)));
+                refresh(a);
+            });
         }
         Command::Settings => win::open(&config::ensure_file()),
         Command::ShowProgress => {
@@ -274,7 +289,8 @@ pub fn handle_events() {
                         let lang = lang.map(|l| format!(" · {}", language::describe(&l))).unwrap_or_default();
                         tray::balloon("Transcript ready", &format!("{name}{lang}\nClick to open."), Some(t));
                     }
-                    (None, e) => tray::balloon("Transcription failed", &format!("{}\nThe audio was saved: {name}.wav", e.unwrap_or_default()),
+                    (None, e) => tray::balloon("Transcription failed", &format!("{}\nThe audio is kept: {}", e.unwrap_or_default(),
+                        audio.file_name().unwrap_or_default().to_string_lossy()),
                         audio.parent().map(Path::to_path_buf)),
                 }
                 with_app(|a| a.status = a.ready.as_ref().map_or_else(|| "ready".into(), |r| format!("ready · {}", r.short())));
@@ -328,10 +344,11 @@ fn single_instance(wait: bool) -> Option<HANDLE> {
 }
 
 /// Command-line modes for testing on a machine: `--selftest` tests every backend and prints the
-/// report; `--record <seconds> [name]` records, then saves and transcribes like the tray does.
+/// report; `--record <seconds> [name]` records, then saves and transcribes like the tray does;
+/// `--transcribe <file>` transcribes an audio file again.
 fn cli(args: &[String]) -> Option<i32> {
     let mode = args.get(1)?.as_str();
-    if !matches!(mode, "--selftest" | "--record") {
+    if !matches!(mode, "--selftest" | "--record" | "--transcribe") {
         return None;
     }
     unsafe { let _ = AttachConsole(ATTACH_PARENT_PROCESS); }
@@ -352,6 +369,11 @@ fn cli(args: &[String]) -> Option<i32> {
             }
             Some(0)
         }
+        "--transcribe" => {
+            let Some(file) = args.get(2) else { eprintln!("usage: whisperer --transcribe <audio file>"); return Some(1) };
+            worker.handle(Job::Retranscribe(PathBuf::from(file)));
+            print_done(last.lock().unwrap().take())
+        }
         _ => {
             let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
             let stamp = timestamp();
@@ -369,24 +391,29 @@ fn cli(args: &[String]) -> Option<i32> {
             }
             let base = output_base(&cfg.output_dir, &stamp, args.get(3).map(|n| name_dialog::sanitize(n)).as_deref());
             worker.handle(Job::Transcribe { tracks: tracks.into_iter().map(|t| t.path).collect(), base });
-            match last.lock().unwrap().take() {
-                Some(Report::Done { audio, transcript, language: lang, error }) => {
-                    println!("Audio: {}", audio.display());
-                    if let Some(l) = lang {
-                        println!("Language: {}", language::describe(&l));
-                    }
-                    if let Some(t) = transcript {
-                        println!("Transcript: {}\n{}", t.display(), std::fs::read_to_string(&t).unwrap_or_default());
-                    }
-                    if let Some(e) = error {
-                        println!("Error: {e}");
-                        return Some(1);
-                    }
-                    Some(0)
-                }
-                _ => Some(1),
-            }
+            print_done(last.lock().unwrap().take())
         }
+    }
+}
+
+/// Prints a transcription's result for the command-line modes; returns the exit code.
+fn print_done(report: Option<Report>) -> Option<i32> {
+    match report {
+        Some(Report::Done { audio, transcript, language: lang, error }) => {
+            println!("Audio: {}", audio.display());
+            if let Some(l) = lang {
+                println!("Language: {}", language::describe(&l));
+            }
+            if let Some(t) = transcript {
+                println!("Transcript: {}\n{}", t.display(), std::fs::read_to_string(&t).unwrap_or_default());
+            }
+            if let Some(e) = error {
+                println!("Error: {e}");
+                return Some(1);
+            }
+            Some(0)
+        }
+        _ => Some(1),
     }
 }
 

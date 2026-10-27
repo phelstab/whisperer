@@ -33,7 +33,7 @@ struct Asset {
 }
 
 /// Bumped when what goes into a runtime folder changes, so cached self-test verdicts are redone.
-const RUNTIME_REV: u32 = 2;
+const RUNTIME_REV: u32 = 3;
 
 /// NVIDIA libraries a backend's zip lacks, from NVIDIA's redistributable archives (checksums from
 /// developer.download.nvidia.com/compute/cuda/redist/redistrib_<version>.json). Their DLLs are
@@ -110,6 +110,15 @@ impl Model {
     }
 }
 
+/// Silero voice activity detection in whisper.cpp's format. Only speech is passed to whisper:
+/// on silence large-v3 makes up phrases ("Danke fürs Zuschauen") and repeats them for minutes.
+const VAD_MODEL: Asset = Asset {
+    url: "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin",
+    file: "ggml-silero-v5.1.2.bin",
+    size: 885_098,
+    sha256: "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
+};
+
 /// Self-test clip (public domain, from whisper.cpp's samples) and words its transcript must contain.
 const JFK_WAV: &[u8] = include_bytes!("../assets/jfk.wav");
 const JFK_WORDS: &str = "ask not what your country can do for you";
@@ -120,6 +129,8 @@ pub enum Job {
     Prepare,
     /// Mix a finished recording into `<base>.wav` and transcribe it to `<base>.txt` / `.srt`.
     Transcribe { tracks: Vec<PathBuf>, base: PathBuf },
+    /// Transcribe an existing audio file again, replacing the `.txt` / `.srt` next to it.
+    Retranscribe(PathBuf),
     /// Test every backend this machine supports (ignoring cached verdicts) and write a report.
     SelfTest,
 }
@@ -206,6 +217,7 @@ struct Choice {
     cli: PathBuf,
     model: PathBuf,
     model_kind: Model,
+    vad: PathBuf,
 }
 
 impl Choice {
@@ -274,6 +286,10 @@ impl Worker {
                 let done = self.transcribe(&cfg, &tracks, &base);
                 (self.report)(done);
             }
+            Job::Retranscribe(audio) => {
+                let done = self.transcribe_file(&cfg, &audio);
+                (self.report)(done);
+            }
             Job::SelfTest => {
                 let path = self.selftest_report(&cfg);
                 (self.report)(Report::SelfTest(path));
@@ -288,7 +304,7 @@ impl Worker {
     /// Finds the best backend that passes its self-test, downloading as needed; skips `exclude`.
     fn prepare(&mut self, cfg: &Config, exclude: &[Backend]) -> Result<Choice, String> {
         if let Some(c) = &self.choice {
-            if !exclude.contains(&c.backend) && c.cli.exists() && c.model.exists() {
+            if !exclude.contains(&c.backend) && c.cli.exists() && c.model.exists() && c.vad.exists() {
                 return Ok(c.clone());
             }
         }
@@ -319,7 +335,8 @@ impl Worker {
                 }
             };
             let model_path = self.ensure_model(model)?;
-            let choice = Choice { backend: b, gpu: gpu.clone(), driver_cuda: cuda.driver_text(), cli, model: model_path, model_kind: model };
+            let vad = self.ensure_vad()?;
+            let choice = Choice { backend: b, gpu: gpu.clone(), driver_cuda: cuda.driver_text(), cli, model: model_path, model_kind: model, vad };
             if state.verdicts.get(&key).is_some_and(|v| v.ok) {
                 self.choice = Some(choice.clone());
                 (self.report)(Report::Ready(choice.ready()));
@@ -403,6 +420,13 @@ impl Worker {
         Ok(path)
     }
 
+    /// Makes sure the VAD model is downloaded; returns its path.
+    fn ensure_vad(&self) -> Result<PathBuf, String> {
+        let path = self.data.join("models").join(VAD_MODEL.file);
+        self.download(&VAD_MODEL, &path, "voice detection model")?;
+        Ok(path)
+    }
+
     fn download(&self, a: &Asset, dest: &Path, what: &str) -> Result<(), String> {
         let verified = download::with_suffix(dest, ".sha256");
         if !(dest.exists() && fs::read_to_string(&verified).is_ok_and(|m| m.trim() == a.sha256)) {
@@ -445,6 +469,10 @@ impl Worker {
         let mut cmd = Command::new(&c.cli);
         cmd.arg("-m").arg(short(&c.model)).arg("-f").arg(short(wav)).arg("-of").arg(short_prefix(prefix))
             .arg("-l").arg(language).arg("-t").arg(threads.to_string()).arg("-pp").args(outputs)
+            // Each 30 s window is decoded without the previous windows' text as prompt: with it, one
+            // repeated sentence becomes the prompt for the next window and loops until the end.
+            .arg("-mc").arg("0")
+            .arg("--vad").arg("-vm").arg(short(&c.vad))
             .current_dir(c.cli.parent().unwrap())
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped())
             .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -499,8 +527,8 @@ impl Worker {
         Ok((device.map(|d| format!(" ({d})")).unwrap_or_default(), detected))
     }
 
-    /// Mixes the tracks into `<base>.wav`, then transcribes it, falling back to the next backend if
-    /// one fails. The audio is kept even if transcription fails.
+    /// Mixes the tracks into `<base>.wav`, then transcribes it. The audio is kept even if
+    /// transcription fails.
     fn transcribe(&mut self, cfg: &Config, tracks: &[PathBuf], base: &Path) -> Report {
         let name = base.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let audio_path = base.with_extension("wav");
@@ -511,13 +539,29 @@ impl Worker {
         if let Err(e) = mixed {
             return Report::Done { audio: audio_path, transcript: None, language: None, error: Some(e) };
         }
-        let fail = |error: String| Report::Done { audio: audio_path.clone(), transcript: None, language: None, error: Some(error) };
+        self.transcribe_file(cfg, &audio_path)
+    }
+
+    /// Transcribes `audio_path` to the `.txt` / `.srt` next to it (replacing them), falling back to
+    /// the next backend if one fails.
+    fn transcribe_file(&mut self, cfg: &Config, audio_path: &Path) -> Report {
+        let name = audio_path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let fail = |error: String| Report::Done { audio: audio_path.to_path_buf(), transcript: None, language: None, error: Some(error) };
+        if !audio_path.exists() {
+            return fail(format!("{} not found", audio_path.display()));
+        }
 
         let tmp = self.tmp();
         let wav16 = tmp.join("job.wav");
-        if let Err(e) = audio::to_16k_mono(&audio_path, &wav16) {
-            return fail(e);
-        }
+        // Our recordings get our resampler; whisper-cli decodes anything else (other WAVs, MP3, FLAC) itself.
+        let input = if audio::is_recording(audio_path) {
+            if let Err(e) = audio::to_16k_mono(audio_path, &wav16) {
+                return fail(e);
+            }
+            wav16.clone()
+        } else {
+            audio_path.to_path_buf()
+        };
         let prefix = tmp.join("job");
         let Some(language) = language::parse(&cfg.language) else {
             let _ = fs::remove_file(&wav16);
@@ -531,7 +575,7 @@ impl Worker {
             };
             self.status(format!("Transcribing {name} ({})…", choice.backend.label()));
             let progress = |p: u32| self.status(format!("Transcribing {name} ({}): {p}%", choice.backend.label()));
-            match self.run_cli(&choice, &wav16, &prefix, &language, &["-otxt", "-osrt"], None, &progress) {
+            match self.run_cli(&choice, &input, &prefix, &language, &["-otxt", "-osrt"], None, &progress) {
                 Ok((_, detected)) => break Ok(detected.unwrap_or_else(|| language.clone())),
                 Err(e) => {
                     // e.g. out of GPU memory: let the next backend take over for this recording
@@ -550,11 +594,11 @@ impl Worker {
             Err(e) => return fail(e),
         };
         for ext in ["txt", "srt"] {
-            if let Err(e) = move_file(&prefix.with_extension(ext), &base.with_extension(ext)) {
+            if let Err(e) = move_file(&prefix.with_extension(ext), &audio_path.with_extension(ext)) {
                 return fail(e);
             }
         }
-        Report::Done { audio: audio_path.clone(), transcript: Some(base.with_extension("txt")), language: Some(language), error: None }
+        Report::Done { audio: audio_path.to_path_buf(), transcript: Some(audio_path.with_extension("txt")), language: Some(language), error: None }
     }
 
     /// Tests every backend the machine should support, ignoring cached verdicts, and writes a
@@ -587,7 +631,7 @@ impl Worker {
                 continue;
             }
             let result = self.ensure_runtime(b).and_then(|cli| {
-                let choice = Choice { backend: b, gpu: gpu.clone(), driver_cuda: cuda.driver_text(), cli, model: self.ensure_model(model)?, model_kind: model };
+                let choice = Choice { backend: b, gpu: gpu.clone(), driver_cuda: cuda.driver_text(), cli, model: self.ensure_model(model)?, model_kind: model, vad: self.ensure_vad()? };
                 self.status(format!("Self-test: {}…", choice.describe()));
                 self.selftest(&choice)
             });
